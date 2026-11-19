@@ -1,0 +1,267 @@
+name: Build Hisense HNR101 Firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build HNR101 (ImmortalWrt 6.12 + NSS + Clashoo + QModem)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Disk usage before cleanup ==="
+          df -h
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/local/share/boost || true
+          sudo docker image prune --all --force || true
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          sudo apt-get clean || true
+          echo "=== Disk usage after cleanup ==="
+          df -h
+
+      - name: Install OpenWrt build dependencies (Ubuntu 24.04)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cpio curl device-tree-compiler ecj fastjar file flex gawk \
+            gcc-multilib g++-multilib gettext git gperf haveged help2man intltool jq \
+            libdw-dev libelf-dev libglib2.0-dev libgmp-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libsqlite3-dev libssl-dev libtool lld llvm lzop ninja-build \
+            p7zip-full patch perl pkg-config python3 python3-pip python3-pyelftools \
+            python3-setuptools qemu-utils rsync squashfs-tools subversion swig texinfo \
+            time unzip wget xsltproc xxd zlib1g-dev zstd
+
+      - name: Clone ImmortalWrt (kernel-6.12)
+        run: |
+          git clone --depth=1 -b kernel-6.12 https://github.com/sqliuchang/immortalwrt.git openwrt
+
+      - name: Add Clashoo and QModem feeds and guard NSS packages
+        run: |
+          git clone --depth=1 https://github.com/kenzok8/openwrt-clashoo.git openwrt/package/openwrt-clashoo
+
+          cd openwrt
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path("feeds.conf.default")
+          content = p.read_text(encoding="utf-8")
+          if content and not content.endswith("\n"):
+              content += "\n"
+          line = "src-git qmodem https://github.com/FUjr/QModem.git;main\n"
+          if "src-git qmodem " not in content:
+              content += line
+          p.write_text(content, encoding="utf-8")
+          print("=== feeds.conf.default ===")
+          print(p.read_text(encoding="utf-8"))
+          EOF
+
+          ./scripts/feeds update -a
+
+          echo "=== Inspecting feeds/qmodem/driver/nss ==="
+          ls -la feeds/qmodem/driver/nss || true
+
+          python3 - <<'EOF'
+          import re
+          import shutil
+          from pathlib import Path
+
+          def parse_index_packages(index_path: Path):
+              pkgs = set()
+              by_source = {}
+              if not index_path.exists():
+                  return pkgs, by_source
+              cur_src = None
+              for line in index_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                  if line.startswith("Source-Makefile: "):
+                      cur_src = line.split(": ", 1)[1].strip().lstrip("./")
+                  elif line.startswith("Package: "):
+                      pkg = line.split(": ", 1)[1].strip()
+                      pkgs.add(pkg)
+                      if cur_src:
+                          by_source.setdefault(cur_src, set()).add(pkg)
+              return pkgs, by_source
+
+          def parse_makefile_packages(mk_path: Path):
+              pkgs = set()
+              txt = mk_path.read_text(encoding="utf-8", errors="replace")
+              pkg_name = None
+              for m in re.finditer(r"^\s*PKG_NAME\s*:=\s*([^\s#]+)", txt, re.M):
+                  pkg_name = m.group(1)
+                  pkgs.add(pkg_name)
+              for m in re.finditer(r"^\s*define\s+(?:KernelPackage|Package)/([^\s/]+)", txt, re.M):
+                  name = m.group(1)
+                  if name == "$(PKG_NAME)" and pkg_name:
+                      name = pkg_name
+                  if not name.startswith("$("):
+                      pkgs.add(name)
+                      if m.group(0).lstrip().startswith("define KernelPackage/"):
+                          pkgs.add("kmod-" + name)
+              return pkgs
+
+          nss_pkgs, _ = parse_index_packages(Path("feeds/nss_packages.index"))
+          nss_root = Path("feeds/nss_packages")
+          if nss_root.exists():
+              for mk in nss_root.rglob("Makefile"):
+                  nss_pkgs |= parse_makefile_packages(mk)
+                  nss_pkgs.add(mk.parent.name)
+
+          _, qmodem_by_src = parse_index_packages(Path("feeds/qmodem.index"))
+          qmodem_nss = Path("feeds/qmodem/driver/nss")
+          removed = []
+          if qmodem_nss.exists():
+              for sub in sorted(qmodem_nss.iterdir()):
+                  if not sub.is_dir():
+                      continue
+                  sub_pkgs = {sub.name}
+                  mk = sub / "Makefile"
+                  if mk.exists():
+                      sub_pkgs |= parse_makefile_packages(mk)
+                      rel_mk = mk.as_posix()
+                      sub_pkgs |= qmodem_by_src.get(rel_mk, set())
+                  collisions = sorted(sub_pkgs & nss_pkgs)
+                  if collisions:
+                      print(f"Removing colliding QModem NSS package dir {sub} (collisions: {collisions})")
+                      shutil.rmtree(sub)
+                      removed.append(sub.name)
+                  else:
+                      print(f"Keeping non-colliding QModem NSS package dir {sub} (packages: {sorted(sub_pkgs)})")
+          Path("/tmp/qmodem_nss_removed").write_text("\n".join(removed), encoding="utf-8")
+          EOF
+
+          if [ -s /tmp/qmodem_nss_removed ]; then
+            ./scripts/feeds update -i
+          fi
+          ./scripts/feeds install -a
+
+      - name: Apply custom files and config
+        run: |
+          mkdir -p openwrt/files
+          cp -a files/. openwrt/files/
+          cp config/hnr101.config openwrt/.config
+          cd openwrt
+          umask 022
+          make defconfig
+
+      - name: Pre-flight config and firmware verification
+        run: |
+          set -e
+          cd openwrt
+          echo "=== Matching .config lines ==="
+          grep -E 'hisense_hnr101|NSS|ATH11K|clashoo|openclash|qmodem|mhi|wwan|mtk-t7xx|qmi|mbim|automount' .config || true
+
+          REQUIRED_SYMBOLS=(
+            "CONFIG_TARGET_qualcommax_ipq807x_DEVICE_hisense_hnr101"
+            "CONFIG_ATH11K_NSS_SUPPORT"
+            "CONFIG_PACKAGE_kmod-qca-nss-drv"
+            "CONFIG_PACKAGE_kmod-qca-nss-ecm"
+            "CONFIG_PACKAGE_clashoo"
+            "CONFIG_PACKAGE_luci-app-clashoo"
+            "CONFIG_PACKAGE_qmodem"
+            "CONFIG_PACKAGE_luci-app-qmodem-next"
+            "CONFIG_PACKAGE_kmod-mhi-pci-generic"
+            "CONFIG_PACKAGE_kmod-mhi-wwan-mbim"
+            "CONFIG_PACKAGE_kmod-mhi-wwan-ctrl"
+            "CONFIG_PACKAGE_kmod-mhi-net"
+            "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan"
+            "CONFIG_PACKAGE_kmod-usb-net-cdc-mbim"
+          )
+
+          for sym in "${REQUIRED_SYMBOLS[@]}"; do
+            if ! grep -Fqx "${sym}=y" .config; then
+              echo "::error::Required config symbol missing or not =y: ${sym}"
+              exit 1
+            fi
+          done
+
+          FORBIDDEN_SYMBOLS=(
+            "CONFIG_PACKAGE_luci-app-openclash"
+            "CONFIG_PACKAGE_automount"
+            "CONFIG_PACKAGE_kmod-pcie_mhi"
+            "CONFIG_PACKAGE_kmod-qmi_wwan_q"
+          )
+
+          for sym in "${FORBIDDEN_SYMBOLS[@]}"; do
+            if grep -Fqx "${sym}=y" .config; then
+              echo "::error::Forbidden config symbol is enabled (=y): ${sym}"
+              exit 1
+            fi
+          done
+
+          CAL_FILE="files/lib/firmware/ath11k/IPQ8074/hw2.0/cal-ahb-c000000.wifi.bin"
+          if [ ! -f "$CAL_FILE" ]; then
+            echo "::error::Missing calibration file: $CAL_FILE"
+            exit 1
+          fi
+          CAL_SIZE=$(stat -c%s "$CAL_FILE")
+          CAL_SHA=$(sha256sum "$CAL_FILE" | awk '{print $1}')
+          echo "Calibration file size=${CAL_SIZE}, sha256=${CAL_SHA}"
+          if [ "$CAL_SIZE" -ne 131072 ]; then
+            echo "::error::Calibration file size is ${CAL_SIZE}, expected 131072"
+            exit 1
+          fi
+          case "$CAL_SHA" in
+            2d9ffc0f895cd808*) ;;
+            *)
+              echo "::error::Calibration file SHA256 (${CAL_SHA}) does not start with 2d9ffc0f895cd808"
+              exit 1
+              ;;
+          esac
+          echo "Pre-flight assertions passed!"
+
+      - name: Cache OpenWrt downloads
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('config/hnr101.config', '.github/workflows/build.yml') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-dl-
+
+      - name: Download package sources
+        run: |
+          cd openwrt
+          umask 022
+          make download -j8 || true
+          find dl -type f -size -1024c -print -delete
+          make download -j8 || make download -j1 V=s
+
+      - name: Compile firmware
+        run: |
+          cd openwrt
+          umask 022
+          make -j$(nproc) || make -j1 V=s
+
+      - name: Stage release assets
+        run: |
+          mkdir -p release_assets
+          find openwrt/bin/targets/qualcommax/ipq807x -maxdepth 1 -type f -name '*hisense_hnr101*' -exec cp -v {} release_assets/ \;
+          cp -v openwrt/bin/targets/qualcommax/ipq807x/sha256sums release_assets/sha256sums
+          cp -v openwrt/.config release_assets/build.config
+          ls -lh release_assets/
+          test -n "$(find release_assets -maxdepth 1 -type f -name '*hisense_hnr101*')"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hnr101-firmware
+          path: release_assets/
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "build-${{ github.run_number }}"
+          files: release_assets/*
