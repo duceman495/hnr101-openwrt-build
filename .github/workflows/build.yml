@@ -256,7 +256,7 @@ jobs:
           cd openwrt
           umask 022
           make download -j8 || true
-          find dl -type f -size -1024c -print -delete
+          find dl -maxdepth 1 -type f -size -1024c -print -delete
           make download -j8 || make download -j1 V=s
 
       - name: Compile firmware
