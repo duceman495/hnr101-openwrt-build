@@ -160,7 +160,7 @@ jobs:
           set -e
           cd openwrt
           echo "=== Matching .config lines ==="
-          grep -E 'hisense_hnr101|NSS|ATH11K|clashoo|openclash|qmodem|mhi|wwan|mtk-t7xx|qmi|mbim|automount' .config || true
+          grep -E 'hisense_hnr101|NSS|ATH11K|clashoo|openclash|qmodem|mhi|wwan|mtk-t7xx|qmi|mbim|automount|zh-cn|zh_Hans|argon|diskman|samba4|hd-idle|aria2|ariang|usb-storage|ntfs3|exfat|vfat|block-mount' .config || true
 
           REQUIRED_SYMBOLS=(
             "CONFIG_TARGET_qualcommax_ipq807x_DEVICE_hisense_hnr101"
@@ -177,6 +177,22 @@ jobs:
             "CONFIG_PACKAGE_kmod-mhi-net"
             "CONFIG_PACKAGE_kmod-usb-net-qmi-wwan"
             "CONFIG_PACKAGE_kmod-usb-net-cdc-mbim"
+            "CONFIG_LUCI_LANG_zh_Hans"
+            "CONFIG_PACKAGE_luci-i18n-base-zh-cn"
+            "CONFIG_PACKAGE_luci-theme-argon"
+            "CONFIG_PACKAGE_block-mount"
+            "CONFIG_PACKAGE_kmod-usb-storage"
+            "CONFIG_PACKAGE_kmod-usb-storage-uas"
+            "CONFIG_PACKAGE_kmod-fs-ntfs3"
+            "CONFIG_PACKAGE_kmod-fs-exfat"
+            "CONFIG_PACKAGE_kmod-fs-vfat"
+            "CONFIG_PACKAGE_luci-app-diskman"
+            "CONFIG_PACKAGE_luci-app-samba4"
+            "CONFIG_PACKAGE_samba4-server"
+            "CONFIG_PACKAGE_luci-app-hd-idle"
+            "CONFIG_PACKAGE_luci-app-aria2"
+            "CONFIG_PACKAGE_aria2"
+            "CONFIG_PACKAGE_ariang"
           )
 
           for sym in "${REQUIRED_SYMBOLS[@]}"; do
@@ -199,6 +215,12 @@ jobs:
               exit 1
             fi
           done
+
+          UCI_DEFAULTS="files/etc/uci-defaults/99-hnr101-defaults"
+          if [ ! -x "$UCI_DEFAULTS" ]; then
+            echo "::error::Missing or non-executable uci-defaults script: $UCI_DEFAULTS"
+            exit 1
+          fi
 
           CAL_FILE="files/lib/firmware/ath11k/IPQ8074/hw2.0/cal-ahb-c000000.wifi.bin"
           if [ ! -f "$CAL_FILE" ]; then
