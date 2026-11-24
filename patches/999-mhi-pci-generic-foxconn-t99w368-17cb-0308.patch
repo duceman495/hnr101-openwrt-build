@@ -1,0 +1,12 @@
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -797,6 +797,9 @@ static const struct pci_device_id mhi_pci_id_table[] = {
+ 	/* Telit FE990A */
+ 	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_QCOM, 0x0308, 0x1c5d, 0x2015),
+ 		.driver_data = (kernel_ulong_t) &mhi_telit_fe990a_info },
++	/* Foxconn T99W368 (sdx65) generic/engineering PCI ID */
++	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_QCOM, 0x0308, PCI_VENDOR_ID_QCOM, 0x0308),
++		.driver_data = (kernel_ulong_t) &mhi_foxconn_t99w368_info },
+ 	{ PCI_DEVICE(PCI_VENDOR_ID_QCOM, 0x0308),
+ 		.driver_data = (kernel_ulong_t) &mhi_qcom_sdx65_info },
+ 	/* Telit FN990B40 (sdx72) */

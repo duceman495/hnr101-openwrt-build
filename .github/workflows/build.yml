@@ -150,6 +150,28 @@ jobs:
         run: |
           mkdir -p openwrt/files
           cp -a files/. openwrt/files/
+
+          mkdir -p openwrt/target/linux/generic/hack-6.12
+          cp -v patches/*.patch openwrt/target/linux/generic/hack-6.12/
+
+          python3 - <<'EOF'
+          import json
+          from pathlib import Path
+
+          p = Path("openwrt/feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_support.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          qc = data["modem_support"]["device"]["foxconn"]["qualcomm"]
+          for vid in ("0489",):
+              if vid not in qc["vendor_id"]:
+                  qc["vendor_id"].append(vid)
+          for pid in ("e0d8", "e0ee"):
+              if pid not in qc["product_id"]:
+                  qc["product_id"].append(pid)
+          p.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+          print("=== Updated foxconn.qualcomm in modem_support.json ===")
+          print(json.dumps(qc, indent=2))
+          EOF
+
           cp config/hnr101.config openwrt/.config
           cd openwrt
           umask 022
@@ -222,6 +244,29 @@ jobs:
             exit 1
           fi
 
+          MHI_PATCH="target/linux/generic/hack-6.12/999-mhi-pci-generic-foxconn-t99w368-17cb-0308.patch"
+          if [ ! -f "$MHI_PATCH" ]; then
+            echo "::error::Missing kernel MHI patch: $MHI_PATCH"
+            exit 1
+          fi
+          grep -Fq "mhi_foxconn_t99w368_info" "$MHI_PATCH"
+          grep -Fq "PCI_DEVICE_SUB(PCI_VENDOR_ID_QCOM, 0x0308, PCI_VENDOR_ID_QCOM, 0x0308)" "$MHI_PATCH"
+
+          python3 - <<'EOF'
+          import json
+          from pathlib import Path
+
+          p = Path("feeds/qmodem/application/qmodem/files/usr/share/qmodem/modem_support.json")
+          data = json.loads(p.read_text(encoding="utf-8"))
+          qc = data["modem_support"]["device"]["foxconn"]["qualcomm"]
+          for vid in ("0489", "17cb"):
+              assert vid in qc["vendor_id"], f"Missing vendor_id {vid}: {qc['vendor_id']}"
+          for pid in ("0308", "e0d8", "e0ee"):
+              assert pid in qc["product_id"], f"Missing product_id {pid}: {qc['product_id']}"
+          assert "t99w368" in data["modem_support"]["pcie"], "Missing t99w368 in modem_support.pcie"
+          print("modem_support.json verification passed:", qc)
+          EOF
+
           CAL_FILE="files/lib/firmware/ath11k/IPQ8074/hw2.0/cal-ahb-c000000.wifi.bin"
           if [ ! -f "$CAL_FILE" ]; then
             echo "::error::Missing calibration file: $CAL_FILE"
@@ -258,6 +303,16 @@ jobs:
           make download -j8 || true
           find dl -maxdepth 1 -type f -size -1024c -print -delete
           make download -j8 || make download -j1 V=s
+
+          KERNEL_TARBALL=$(ls dl/linux-6.12.*.tar.xz | head -n1)
+          test -n "$KERNEL_TARBALL"
+          TMP_MHI=$(mktemp -d)
+          tar -xJf "$KERNEL_TARBALL" -C "$TMP_MHI" --wildcards '*/drivers/bus/mhi/host/pci_generic.c'
+          MHI_SRC=$(find "$TMP_MHI" -name pci_generic.c | head -n1)
+          test -n "$MHI_SRC"
+          MHI_ROOT=$(cd "$(dirname "$MHI_SRC")/../../../.." && pwd)
+          patch --dry-run --batch -p1 -d "$MHI_ROOT" < target/linux/generic/hack-6.12/999-mhi-pci-generic-foxconn-t99w368-17cb-0308.patch
+          rm -rf "$TMP_MHI"
 
       - name: Compile firmware
         run: |
